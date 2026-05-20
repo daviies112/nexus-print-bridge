@@ -2,5 +2,12 @@ node_modules/
 dist/
 key.pem
 cert.pem
+dist/key.pem
+dist/cert.pem
 *.exe
 .env
+*.log
+*.pdf
+*.tar.gz
+.DS_Store
+Thumbs.db

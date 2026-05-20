@@ -1,42 +1,90 @@
-# NEXUS PRINT CONNECTOR
+# NEXUS PRINT CONNECTOR (BRIDGE LOCAL)
+> **Serviço Local de Impressão Silenciosa e Criptografada**  
+> *Implementação Oficial - Nexus Intelligence (v4)*
 
-**Arquitetura Técnica de Impressão Silenciosa e Customização White-Label**
-*Implementação Oficial - Nexus Intelligence*
-
----
-
-## 1. INTRODUÇÃO E CONTEXTO
-
-Esta revisão técnica final (**v4**) resolve com precisão matemática as duas últimas pendências de UX e compatibilidade de navegadores, consolidando a especificação como **100% pronta para produção** e à prova de falhas (*production-ready*).
-
-Garantimos que a transição de etapas do modal de download ocorra de forma instantânea e robusta (sem memory leaks de timers no React) e que o guia de ativação de SSL local atenda com clareza aos usuários de todos os navegadores modernos (Chrome, Edge, Firefox, Opera e Safari).
+O **Nexus Print Connector** é um microserviço local que conecta a plataforma web do SaaS Nexus diretamente com as impressoras térmicas físicas de etiquetas e notas fiscais instaladas na máquina do cliente. Ele age em segundo plano, ouvindo conexões WebSocket Seguras (`wss://`) e executando impressões silenciosas instantaneamente.
 
 ---
 
-## 2. RESOLUÇÃO DOS DESAFIOS TÉCNICOS CRÍTICOS
+## 🚀 Como Executar em Desenvolvimento
 
-### 2.1. Desmistificando o SmartScreen vs. Windows Defender
-*   **Windows Defender Antivirus**: Escaneia o binário em busca de assinaturas de vírus. A submissão gratuita no portal *Microsoft Security Intelligence* resolve falsos positivos do antivírus.
-*   **Windows SmartScreen (Reputation Service)**: Controla a tela azul de "Editor Desconhecido". Baseia-se exclusivamente na **reputação acumulada do hash do arquivo** por volume de downloads.
-*   **Mitigação Comercial Real**: Para o MVP, a solução de custo zero é **educar o usuário através de copywriting e guias visuais** a clicar em "Mais informações" e "Executar assim mesmo". O SmartScreen persistirá para os primeiros blocos de usuários até que o instalador acumule dezenas de downloads orgânicos limpos.
+### Requisitos Pró-Requisitos
+*   **Node.js**: Versão 18 ou superior.
+*   **Ambiente Windows**: Para execução da impressão física real.
+*   **Ambiente Linux/macOS**: Habilita automaticamente o **Modo Simulação** (perfeito para testar fluxos de integração sem impressora física).
 
-### 2.2. Protocolo de Resposta do WebApp Hardware Bridge (Hook v1.0.0+)
-O WHB não retorna respostas estruturadas de confirmação (`'success'` ou `'error'`) por padrão.
-*   **Solução no Hook**: Implementamos um **timer de fallback de 5 segundos** via `setTimeout` (com cleanup no `useEffect`) que altera o estado `printing` de volta para `false` após o disparo da mensagem no WebSocket, impedindo que a interface da plataforma trave em "Imprimindo...".
-
-### 2.3. Transição de Etapas no Modal (Zero Memory Leaks)
-Eliminamos completamente o uso de `setTimeout` assíncrono para mudar o estado do modal. O download do arquivo `.exe`/`.msi` roda em background no navegador de forma invisível. 
-*   **Melhoria de UX**: O clique no botão "Baixar Instalador" agora **dispara o download e avança instantaneamente para o Passo 2**. Isso é extremamente limpo, elimina qualquer timer solto no ciclo de vida do componente e exibe as instruções de instalação imediatamente enquanto o download ocorre em segundo plano.
-
-### 2.4. Guia SSL Universal (Chrome, Edge, Firefox e Safari)
-Cada navegador possui uma nomenclatura e fluxo ligeiramente diferente para aceitar certificados SSL autoassinados em localhost. 
-*   **Solução**: O manual integrado na interface foi atualizado para cobrir explicitamente o Chrome, o Edge e o Firefox, garantindo que o usuário consiga concluir a liberação criptografada `wss://` independente do seu navegador de preferência.
+### Instruções Rápidas de Inicialização
+1. Abra a pasta `nexus-print-bridge` no terminal.
+2. Instale as dependências:
+   ```bash
+   npm install
+   ```
+3. Inicialize o servidor em modo de desenvolvimento:
+   ```bash
+   npm start
+   ```
+4. O conector estará rodando e escutando conexões em:  
+   👉 `wss://localhost:12212`
 
 ---
 
-## 3. STACK TÉCNICA E ESTRUTURA
-- **Linguagem:** Node.js (CommonJS)
-- **Pacotes Principais:** `ws`, `selfsigned`, `axios`, `pkg`
-- **Binários Embutidos:** SumatraPDF.exe (para impressão silenciosa via linha de comando Windows)
-- **Porta:** 12212 (wss://localhost:12212)
-- **Modos de Recepção:** URL estática do PDF ou Base64 (Renderizado instantaneamente pelo cliente via FileReader).
+## 🛠️ Compilação e Empacotamento (.exe)
+
+O conector é empacotado em um único arquivo binário `.exe` para que o cliente final não precise instalar o Node.js. 
+
+Para compilar o binário oficial para Windows x64:
+```bash
+npm run build
+```
+
+*Nota: O script de build executa automaticamente o passo `prebuild`, que limpa chaves privadas e certificados (`*.pem`) gerados em testes locais na pasta `dist/` e no diretório raiz, garantindo a distribuição segura de novas instalações.*
+
+---
+
+## 🖥️ Modo Simulação Cruzada (Linux/VPS)
+
+Se você inicializar o conector em um sistema operacional que não seja o Windows (como um servidor Linux VPS), ele entrará automaticamente no **Modo Simulação**:
+*   Ele não tentará extrair nem chamar o `SumatraPDF` (que é exclusivo de Windows).
+*   Ao receber comandos de impressão, ele criará e apagará o PDF temporário, simulará uma fila e responderá com sucesso em 500ms.
+*   Isso permite que você teste o fluxo de comunicação do webhook da plataforma em ambientes virtuais de staging/dev.
+
+---
+
+## 🧬 Arquitetura e Roteamento
+
+O conector implementa isolamento lógico de múltiplos canais (impressoras) usando parâmetros dinâmicos de rota (`deviceKey`).
+
+```mermaid
+sequenceDiagram
+    participant Frontend as Browser (React SPA)
+    participant Server as server.js (wss://localhost:12212)
+    participant OS as SumatraPDF Engine (Windows CLI)
+
+    Frontend->>Server: Conexão (wss://localhost:12212/printer/etiqueta)
+    Note over Server: Associa canal WebSocket ao deviceKey "etiqueta"
+    Frontend->>Server: Envia Payload { type: "etiqueta", base64: "..." }
+    Server->>Server: Valida payload e tipo da fila
+    Server->>Server: Cria arquivo PDF temporário
+    Server->>OS: Executa SumatraPDF -print-to-default -silent
+    OS-->>Server: Retorno de Execução (Sucesso)
+    Server->>Frontend: Resposta JSON { status: "success", deviceKey: "etiqueta" }
+    Note over Frontend: Notifica usuário via Toast de Sucesso
+```
+
+### Validações de Segurança Robustas:
+*   **Tamanho Máximo:** Payloads Base64 com tamanho superior a 50MB são bloqueados para evitar ataques de estouro de memória (DoS).
+*   **Sanitização:** Entradas de URL são validadas através da API Nativa `URL` para prevenir injeção de parâmetros maliciosos em shell de execução.
+*   **Isolamento:** Se a propriedade `type` no JSON enviado for diferente do `deviceKey` da conexão atual, o servidor rejeita o comando imediatamente.
+
+---
+
+## 🔒 Autorização SSL no Navegador (Nomenclatura por Navegador)
+
+Como o WebSocket seguro necessita de certificados TLS autoassinados locais, a primeira conexão exige que o usuário acesse e autorize o endereço no navegador uma única vez.
+
+1. Acesse o painel de autorização clicando no botão da plataforma ou abrindo:  
+   👉 [https://localhost:12212](https://localhost:12212)
+2. **Navegadores:**
+   *   **Chrome / Edge / Opera:** Clique em **"Avançado"** e depois em **"Continuar para localhost (não seguro)"**.
+   *   **Firefox:** Clique em **"Avançado..."** e depois em **"Aceitar o risco e continuar"**.
+   *   **Safari:** Clique em **"Mostrar Detalhes"** e confirme que confia no certificado local.

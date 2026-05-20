@@ -45,6 +45,10 @@ if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
 const sumatraSourcePath = path.join(__dirname, 'bin', 'SumatraPDF.exe');
 
 function extractSumatraPDF() {
+  if (process.platform !== 'win32') {
+    console.log(`[NexusPrint] Servidor rodando em ambiente não-Windows (${process.platform}). Ativando Modo Simulação de Impressão.`);
+    return;
+  }
   try {
     console.log('[NexusPrint] Verificando executável do SumatraPDF...');
     if (fs.existsSync(sumatraSourcePath)) {
@@ -71,34 +75,65 @@ const server = https.createServer(credentials, (req, res) => {
   res.end('Nexus Print Bridge is Running via Secure Connection!\n');
 });
 
-// 4. Inicializar WebSocket acoplado ao HTTPS
+// 4. Mapeamento de clientes por deviceKey
+const clients = new Map(); // deviceKey -> Set<WebSocket>
+
+// 5. Inicializar WebSocket acoplado ao HTTPS
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
-  const clientUrl = req.url;
-  console.log(`[NexusPrint] Novo cliente conectado: ${clientUrl}`);
+  // Extrai o deviceKey da URL (ex: /printer/etiqueta -> etiqueta)
+  const deviceKey = req.url.replace('/printer/', '').replace(/\//g, '') || 'default';
+  
+  console.log(`[NexusPrint] Novo cliente conectado para o deviceKey: '${deviceKey}'`);
+  
+  if (!clients.has(deviceKey)) {
+    clients.set(deviceKey, new Set());
+  }
+  clients.get(deviceKey).add(ws);
 
   ws.on('message', async (message) => {
-    console.log(`[NexusPrint] Mensagem recebida: ${message}`);
+    console.log(`[NexusPrint] [${deviceKey}] Mensagem recebida: ${message}`);
     try {
       const payload = JSON.parse(message);
       const { type, url, base64 } = payload;
+
+      // Validação de correspondência de deviceKey
+      if (type && type !== deviceKey) {
+        ws.send(JSON.stringify({ 
+          status: 'error', 
+          deviceKey, 
+          message: `DeviceKey mismatch: payload type '${type}' não corresponde ao deviceKey '${deviceKey}' da conexão.` 
+        }));
+        return;
+      }
 
       if (!url && !base64) {
         throw new Error('Nenhuma URL ou dados Base64 do PDF informados no payload.');
       }
 
-      const tempPdfPath = path.join(TEMP_DIR, `print_${Date.now()}.pdf`);
+      // Validação de URL
+      if (url) {
+        try { 
+          new URL(url); 
+        } catch { 
+          throw new Error('URL informada é inválida.'); 
+        }
+      }
+
+      // Validação de Tamanho do Base64 (limite de 50MB)
+      if (base64 && base64.length > 67108864) {
+        throw new Error('Payload Base64 excede o limite máximo permitido de 50MB.');
+      }
+
+      const tempPdfPath = path.join(TEMP_DIR, `print_${deviceKey}_${Date.now()}.pdf`);
 
       if (base64) {
-        console.log(`[NexusPrint] Iniciando impressão de ${type || 'documento'} via Base64...`);
-        // Remove cabeçalhos data URL se existirem
+        console.log(`[NexusPrint] [${deviceKey}] Iniciando gravação de PDF via Base64...`);
         const cleanBase64 = base64.replace(/^data:application\/pdf;base64,/, '');
         fs.writeFileSync(tempPdfPath, Buffer.from(cleanBase64, 'base64'));
       } else {
-        console.log(`[NexusPrint] Iniciando impressão de ${type || 'documento'} via URL: ${url}`);
-        console.log(`[NexusPrint] Baixando arquivo PDF para: ${tempPdfPath}`);
-        
+        console.log(`[NexusPrint] [${deviceKey}] Baixando PDF via URL: ${url}`);
         const response = await axios({
           method: 'get',
           url: url,
@@ -114,9 +149,30 @@ wss.on('connection', (ws, req) => {
         });
       }
 
-      console.log('[NexusPrint] Arquivo pronto. Enviando para a impressora silenciosamente...');
+      console.log(`[NexusPrint] [${deviceKey}] Arquivo pronto. Iniciando processo de envio...`);
 
-      // 6. Execução silenciosa do SumatraPDF
+      // Modo Simulação para sistemas não-Windows (como Linux VPS)
+      if (process.platform !== 'win32') {
+        console.log(`[NexusPrint] [${deviceKey}] [Simulação] Simulando envio. Arquivo criado em: ${tempPdfPath}`);
+        setTimeout(() => {
+          try {
+            if (fs.existsSync(tempPdfPath)) {
+              fs.unlinkSync(tempPdfPath);
+            }
+          } catch (unlinkErr) {
+            console.error('[NexusPrint] Erro ao deletar PDF temporário:', unlinkErr);
+          }
+          console.log(`[NexusPrint] [${deviceKey}] [Simulação] Impressão simulada com sucesso.`);
+          ws.send(JSON.stringify({ 
+            status: 'success', 
+            deviceKey, 
+            message: `Impressão simulada com sucesso no deviceKey '${deviceKey}' (Bypass Linux).` 
+          }));
+        }, 500);
+        return;
+      }
+
+      // 6. Execução silenciosa do SumatraPDF no Windows
       if (!fs.existsSync(SUMATRA_TEMP_PATH)) {
         extractSumatraPDF();
       }
@@ -125,11 +181,9 @@ wss.on('connection', (ws, req) => {
         throw new Error('Executável do SumatraPDF não disponível.');
       }
 
-      // Comando de impressão silenciosa do Windows para a impressora padrão
       const command = `"${SUMATRA_TEMP_PATH}" -print-to-default -silent "${tempPdfPath}"`;
 
       exec(command, (execErr, stdout, stderr) => {
-        // Limpeza imediata do PDF temporário
         try {
           if (fs.existsSync(tempPdfPath)) {
             fs.unlinkSync(tempPdfPath);
@@ -139,25 +193,47 @@ wss.on('connection', (ws, req) => {
         }
 
         if (execErr) {
-          console.error('[NexusPrint] Erro na execução da impressão:', execErr);
-          ws.send(JSON.stringify({ status: 'error', message: execErr.message }));
+          console.error(`[NexusPrint] [${deviceKey}] Erro na execução da impressão:`, execErr);
+          ws.send(JSON.stringify({ status: 'error', deviceKey, message: execErr.message }));
           return;
         }
 
-        console.log('[NexusPrint] Impressão enviada com sucesso para a fila do Windows.');
-        ws.send(JSON.stringify({ status: 'success', message: 'Impressão enviada com sucesso.' }));
+        console.log(`[NexusPrint] [${deviceKey}] Impressão enviada com sucesso para a fila padrão.`);
+        ws.send(JSON.stringify({ 
+          status: 'success', 
+          deviceKey, 
+          message: `Impressão enviada com sucesso para o deviceKey '${deviceKey}'.` 
+        }));
       });
 
     } catch (err) {
-      console.error('[NexusPrint] Falha ao processar mensagem:', err.message);
-      ws.send(JSON.stringify({ status: 'error', message: err.message }));
+      console.error(`[NexusPrint] [${deviceKey}] Falha ao processar mensagem:`, err.message);
+      ws.send(JSON.stringify({ status: 'error', deviceKey, message: err.message }));
     }
   });
 
   ws.on('close', () => {
-    console.log('[NexusPrint] Conexão encerrada pelo cliente.');
+    console.log(`[NexusPrint] Conexão encerrada pelo cliente para o deviceKey: '${deviceKey}'`);
+    const deviceSet = clients.get(deviceKey);
+    if (deviceSet) {
+      deviceSet.delete(ws);
+      if (deviceSet.size === 0) {
+        clients.delete(deviceKey);
+      }
+    }
   });
 });
+
+// 7. Graceful Shutdown
+const cleanup = () => {
+  console.log('[NexusPrint] Sinal de encerramento recebido. Desligando servidor...');
+  server.close(() => {
+    console.log('[NexusPrint] Servidor HTTPS encerrado de forma limpa.');
+    process.exit(0);
+  });
+};
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
 
 server.listen(PORT, () => {
   console.log(`[NexusPrint] Servidor WebSocket seguro rodando em wss://localhost:${PORT}`);
